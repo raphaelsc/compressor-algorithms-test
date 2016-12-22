@@ -236,8 +236,8 @@ static void compressor_test(compressor_type t) {
         uncompressed.trim(s);
         assert(input == uncompressed);
     }
-    {   // generate a buffer with two compressed chunks of 4k and decompress
-        // both of them only using decompressed size (chunk_length).
+    {   // generate a buffer with two compressed chunks and decompress both of
+        // them only using decompressed size (chunk_length).
         auto first_chunk = temporary_buf<char>::random(chunk_length);
         auto first_compressed_chunk = temporary_buf<char>(c->compress_max_size(chunk_length));
         auto ret = c->compress(first_chunk.get(), first_chunk.size(), first_compressed_chunk.get(), first_compressed_chunk.size());
