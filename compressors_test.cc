@@ -14,6 +14,7 @@
 #include <string.h>
 #include <algorithm>
 #include <exception>
+#include <chrono>
 #include "temporary_buf.hh"
 #include "custom_assert.hh"
 
@@ -63,7 +64,7 @@ class lz4_compressor : public compressor {
     }
 
     virtual size_t uncompress(const char* input, size_t input_len, char* output, size_t output_len) override {
-        ssize_t ret = LZ4_decompress_safe(input, output, input_len, output_len);
+        auto ret = LZ4_decompress_safe(input, output, input_len, output_len);
         if (ret < 0) {
             throw std::runtime_error("LZ4 uncompression failure");
         }
@@ -71,9 +72,9 @@ class lz4_compressor : public compressor {
     }
 
     virtual size_t uncompress_fast(const char* input, size_t input_len, char* output, size_t original_size) override {
-        ssize_t ret = LZ4_decompress_fast(input, output, original_size);
+        auto ret = LZ4_decompress_fast(input, output, original_size);
         if (ret < 0) {
-            throw std::runtime_error("LZ4 uncompression failure");
+            throw std::runtime_error("LZ4 fast uncompression failure");
         }
         return ret;
     }
@@ -184,17 +185,19 @@ class snappy_compressor : public compressor {
     virtual size_t compress(const char* input, size_t input_len, char* output, size_t output_len) override {
         auto ret = snappy_compress(input, input_len, output, &output_len);
         if (ret != SNAPPY_OK) {
-            throw std::runtime_error("snappy compression failure: snappy_compress() failed");
+            auto f = (boost::format("snappy compression failure: %1%") % error_msg(ret));
+            throw std::runtime_error(f.str());
         }
         return output_len;
     }
 
     virtual size_t uncompress(const char* input, size_t input_len, char* output, size_t output_len) override {
-        if (snappy_uncompress(input, input_len, output, &output_len) == SNAPPY_OK) {
-            return output_len;
-        } else {
-            throw std::runtime_error("snappy uncompression failure");
+        auto ret = snappy_uncompress(input, input_len, output, &output_len);
+        if (ret != SNAPPY_OK) {
+            auto f = (boost::format("snappy uncompression failure: %1%") % error_msg(ret));
+            throw std::runtime_error(f.str());
         }
+        return output_len;
     }
 
     virtual size_t uncompress_fast(const char* input, size_t input_len, char* output, size_t original_size) override {
@@ -203,6 +206,17 @@ class snappy_compressor : public compressor {
 
     virtual size_t compress_max_size(size_t input_len) {
         return snappy_max_compressed_length(input_len);
+    }
+private:
+    static const char* error_msg(snappy_status s) {
+        switch(s) {
+        case SNAPPY_INVALID_INPUT:
+            return "invalid input";
+        case SNAPPY_BUFFER_TOO_SMALL:
+            return "buffer too small";
+        default:
+            return "unknown";
+        }
     }
 };
 
@@ -267,12 +281,74 @@ static void compressor_test(compressor_type t) {
         assert(second_uncompressed_chunk == second_chunk);
         assert(*(uint32_t*)(first_uncompressed_chunk.get()+chunk_length) == 0xDEADBEEF);
     }
+    {
+        struct stats {
+            int64_t lat_count = 0;
+            int64_t lat_total = 0;
+            int64_t lat_min = std::numeric_limits<int64_t>::max();
+            int64_t lat_max = std::numeric_limits<int64_t>::min();
+            std::vector<int64_t> lats;
+
+            void update(int64_t lat) {
+                lat_count++;
+                lat_total += lat;
+                lat_min = std::min(lat_min, lat);
+                lat_max = std::max(lat_max, lat);
+                lats.push_back(lat);
+            }
+            auto to_print() {
+                std::sort(lats.begin(), lats.end());
+                int64_t med = lats.size() ? lats[lats.size() / 2] : 0;
+                int64_t avg = lat_total / lat_count;
+                auto f = boost::format("med: %1%, min: %2%, max: %3%, avg: %4%") % med % lat_min % lat_max % avg;
+                return f.str();
+            }
+        };
+        const std::vector<int> chunk_lengths = { 4*1024, 16*1024, 64*1024, 256*1024 };
+
+        for (auto chunk_len : chunk_lengths) {
+            std::cout << "chunk lenght: " << chunk_len << std::endl;
+            auto data = temporary_buf<char>::random(chunk_len);
+            auto compressed = temporary_buf<char>(c->compress_max_size(chunk_len));
+            auto ret = c->compress(data.get(), data.size(), compressed.get(), compressed.size());
+            compressed.trim(ret);
+
+            stats with_compressed_length;
+            stats without_compressed_length;
+
+            for (auto i = 0; i < 10000; i++) {
+                auto run = [] (stats& s, auto func) {
+                    auto start = std::chrono::high_resolution_clock::now();
+                    func();
+                    auto passed = std::chrono::high_resolution_clock::now() - start;
+                    auto lat = std::chrono::duration_cast<std::chrono::microseconds>(passed).count();
+                    s.update(lat);
+                };
+
+                run(with_compressed_length, [&] {
+                    auto uncompressed = temporary_buf<char>(chunk_len);
+                    auto ret = c->uncompress(compressed.get(), compressed.size(), uncompressed.get(), uncompressed.size());
+                    assert(ret == chunk_len);
+                    uncompressed.trim(ret);
+                    assert(data == uncompressed);
+                });
+                run(without_compressed_length, [&] {
+                    auto uncompressed = temporary_buf<char>(chunk_len);
+                    auto ret = c->uncompress_fast(compressed.get(), compressed.size(), uncompressed.get(), chunk_len);
+                    assert(ret == compressed.size());
+                    assert(data == uncompressed);
+                });
+            }
+            std::cout << "with compressed length:   \t" << with_compressed_length.to_print() << std::endl;
+            std::cout << "without compressed length:\t" << without_compressed_length.to_print() << std::endl;
+        }
+    }
     } catch (const std::exception& e) {
         std::cout << "Caught exception: " << e.what() << std::endl;
         failure = true;
     }
 
-    std::cout << "status: " << (failure ? "failed" : "done") << std::endl;
+    std::cout << "status: " << (failure ? "failed" : "done") << std::endl << std::endl;
 }
 
 int main(void) {
