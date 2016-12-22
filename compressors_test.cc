@@ -22,8 +22,6 @@
 #include <snappy-c.h>
 #include <zlib.h>
 
-static constexpr size_t chunk_length = 4*1024;
-
 enum class compressor_type {
     none,
     lz4,
@@ -234,6 +232,7 @@ static std::unique_ptr<compressor> make_compressor(compressor_type c) {
 }
 
 static void compressor_test(compressor_type t) {
+    static constexpr size_t chunk_length = 4*1024;
     auto c = make_compressor(t);
     bool failure = false;
     std::cout << "testing " << c->name() << "...\n";
@@ -308,20 +307,21 @@ static void compressor_test(compressor_type t) {
 
         for (auto chunk_len : chunk_lengths) {
             std::cout << "chunk lenght: " << chunk_len << std::endl;
-            auto data = temporary_buf<char>::random(chunk_len);
-            auto compressed = temporary_buf<char>(c->compress_max_size(chunk_len));
-            auto ret = c->compress(data.get(), data.size(), compressed.get(), compressed.size());
-            compressed.trim(ret);
 
             stats with_compressed_length;
             stats without_compressed_length;
 
             for (auto i = 0; i < 10000; i++) {
+                auto data = temporary_buf<char>::random(chunk_len);
+                auto compressed = temporary_buf<char>(c->compress_max_size(chunk_len));
+                auto ret = c->compress(data.get(), data.size(), compressed.get(), compressed.size());
+                compressed.trim(ret);
+
                 auto run = [] (stats& s, auto func) {
                     auto start = std::chrono::high_resolution_clock::now();
                     func();
                     auto passed = std::chrono::high_resolution_clock::now() - start;
-                    auto lat = std::chrono::duration_cast<std::chrono::microseconds>(passed).count();
+                    auto lat = std::chrono::duration_cast<std::chrono::nanoseconds>(passed).count();
                     s.update(lat);
                 };
 
@@ -334,7 +334,7 @@ static void compressor_test(compressor_type t) {
                 });
                 run(without_compressed_length, [&] {
                     auto uncompressed = temporary_buf<char>(chunk_len);
-                    auto ret = c->uncompress_fast(compressed.get(), compressed.size(), uncompressed.get(), chunk_len);
+                    auto ret = c->uncompress_fast(compressed.get(), c->compress_max_size(chunk_len), uncompressed.get(), chunk_len);
                     assert(ret == compressed.size());
                     assert(data == uncompressed);
                 });
