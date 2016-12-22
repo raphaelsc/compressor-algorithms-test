@@ -147,7 +147,7 @@ class deflate_compressor : public compressor {
         }
         // yuck, zlib is not const-correct, and also uses unsigned char while we use char :-(
         zs.next_in = reinterpret_cast<unsigned char*>(const_cast<char*>(input));
-        zs.avail_in = chunk_length*2;
+        zs.avail_in = input_len;
         zs.next_out = reinterpret_cast<unsigned char*>(output);
         zs.avail_out = original_size;
         auto res = inflate(&zs, Z_FINISH);
